@@ -1,6 +1,6 @@
 # Senescence
 
-This repository contains materials created as part of a class project on prompt engineering and AI-assisted content generation.
+This repository contains materials created as part of a class on prompt engineering and AI-assisted content generation.
 
 ## Disclosure
 
