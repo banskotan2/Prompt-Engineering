@@ -1,0 +1,9 @@
+"analysis","samples","tested_genes_with_names","fdr_lt_0.05","up_fdr_lt_0.05","down_fdr_lt_0.05"
+"comparison_1_HAEC_IR",5,18708,7945,3650,4295
+"comparison_2_HUVEC_IR",6,19184,8145,3616,4529
+"comparison_3_IMR90_IR",4,19049,10222,5899,4323
+"comparison_4_IMR90_RE",4,18845,9567,5526,4041
+"comparison_5_WI38_Dox",8,21303,1392,819,573
+"comparison_6_WI38_HRAS",4,18316,8105,4837,3268
+"comparison_7_WI38_IR",4,19841,4606,2447,2159
+"comparison_8_WI38_RE",4,19252,5431,2607,2824

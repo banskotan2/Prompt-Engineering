@@ -1,0 +1,203 @@
+options(stringsAsFactors = FALSE)
+
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(ggplot2)
+  library(ggrepel)
+  library(pheatmap)
+  library(UpSetR)
+})
+
+OUTPUT <- "Codex/Output"
+PLOT_DIR <- file.path(OUTPUT, "Plot")
+TABLE_DIR <- file.path(OUTPUT, "Table")
+REPORT_DIR <- file.path(OUTPUT, "Report")
+
+GROUP_LABELS <- c(
+  `1` = "HAEC_IR", `2` = "HUVEC_IR", `3` = "IMR90_IR", `4` = "IMR90_RE",
+  `5` = "WI38_Dox", `6` = "WI38_HRAS", `7` = "WI38_IR", `8` = "WI38_RE"
+)
+
+load_inputs <- function() {
+  counts <- as.matrix(utils::read.csv("count.csv", row.names = 1, check.names = FALSE))
+  storage.mode(counts) <- "integer"
+  metadata <- utils::read.csv("metadata.csv", check.names = FALSE, fileEncoding = "UTF-8-BOM")
+  rownames(metadata) <- metadata$Filename
+  metadata <- metadata[colnames(counts), , drop = FALSE]
+  metadata$Condition <- factor(metadata$Condition, levels = c("Control", "Senescent"))
+  metadata$Cell <- factor(metadata$Cell)
+  annotation <- utils::read.delim(
+    "Homo_sapiens_HG38_GRCH38_104_Annotation.txt",
+    check.names = FALSE, quote = "", comment.char = ""
+  )
+  annotation <- annotation[!duplicated(annotation$Gene_stable_ID), , drop = FALSE]
+  list(counts = counts, metadata = metadata, annotation = annotation)
+}
+
+comparison_samples <- function(metadata, comparison) {
+  key <- as.character(comparison)
+  metadata$Comparison == key | (comparison %in% c(3, 4) & metadata$Comparison == "3_4")
+}
+
+clean_results <- function(res, annotation) {
+  tab <- as.data.frame(res)
+  tab$Gene_stable_ID <- rownames(tab)
+  idx <- match(tab$Gene_stable_ID, annotation$Gene_stable_ID)
+  tab$Gene_name <- annotation$Gene_name[idx]
+  tab$Gene_description <- annotation$Gene_description[idx]
+  tab <- tab[!is.na(tab$Gene_name) & nzchar(trimws(tab$Gene_name)), , drop = FALSE]
+  tab <- tab[order(is.na(tab$pvalue), tab$pvalue), , drop = FALSE]
+  tab <- tab[, c(
+    "Gene_stable_ID", "Gene_name", "Gene_description", "baseMean", "log2FoldChange",
+    "lfcSE", "stat", "pvalue", "padj"
+  )]
+  rownames(tab) <- NULL
+  tab
+}
+
+safe_svg <- function(filename, width = 8, height = 6, expr) {
+  grDevices::svg(filename, width = width, height = height, onefile = TRUE)
+  on.exit(grDevices::dev.off(), add = TRUE)
+  force(expr)
+}
+
+placeholder_svg <- function(filename, title, detail, width = 8, height = 6) {
+  safe_svg(filename, width, height, {
+    graphics::plot.new()
+    graphics::title(main = title)
+    graphics::text(0.5, 0.5, detail, cex = 1)
+  })
+}
+
+plot_pca <- function(vsd, metadata, prefix, title) {
+  pc <- DESeq2::plotPCA(vsd, intgroup = c("Condition", "Cell"), returnData = TRUE)
+  percent_var <- round(100 * attr(pc, "percentVar"))
+  pc$Sample <- rownames(pc)
+  p <- ggplot(pc, aes(PC1, PC2, color = Condition, shape = Cell, label = Sample)) +
+    geom_point(size = 3) +
+    ggrepel::geom_text_repel(size = 2.5, max.overlaps = Inf) +
+    xlab(sprintf("PC1: %s%% variance", percent_var[1])) +
+    ylab(sprintf("PC2: %s%% variance", percent_var[2])) +
+    ggtitle(title) +
+    theme_bw(base_size = 11) +
+    theme(plot.title = element_text(hjust = 0.5))
+  ggplot2::ggsave(file.path(PLOT_DIR, paste0(prefix, "_PCA.svg")), p, width = 8, height = 6)
+  utils::write.csv(pc, file.path(TABLE_DIR, paste0(prefix, "_PCA_coordinates.csv")), row.names = FALSE)
+}
+
+plot_heatmap <- function(vsd, results_table, metadata, prefix, title, n = 50) {
+  ranked <- results_table[is.finite(results_table$pvalue), , drop = FALSE]
+  genes <- head(unique(ranked$Gene_stable_ID), n)
+  genes <- genes[genes %in% rownames(vsd)]
+  if (length(genes) < 2) {
+    placeholder_svg(file.path(PLOT_DIR, paste0(prefix, "_heatmap.svg")), title, "Insufficient finite genes")
+    return(invisible(NULL))
+  }
+  mat <- assay(vsd)[genes, , drop = FALSE]
+  mat <- t(scale(t(mat)))
+  mat[!is.finite(mat)] <- 0
+  symbols <- results_table$Gene_name[match(genes, results_table$Gene_stable_ID)]
+  rownames(mat) <- make.unique(symbols)
+  ann <- data.frame(Condition = metadata[colnames(mat), "Condition"], Cell = metadata[colnames(mat), "Cell"])
+  rownames(ann) <- colnames(mat)
+  safe_svg(file.path(PLOT_DIR, paste0(prefix, "_heatmap.svg")), 9, 10, {
+    pheatmap::pheatmap(
+      mat, annotation_col = ann, cluster_rows = TRUE, cluster_cols = TRUE,
+      show_colnames = TRUE, fontsize_row = 6, main = title,
+      color = colorRampPalette(c("navy", "white", "firebrick3"))(100)
+    )
+  })
+}
+
+plot_volcano <- function(tab, prefix, title) {
+  d <- tab[is.finite(tab$log2FoldChange) & is.finite(tab$pvalue), , drop = FALSE]
+  d$direction <- "Not significant"
+  d$direction[!is.na(d$padj) & d$padj < 0.05 & d$log2FoldChange > 0] <- "Upregulated"
+  d$direction[!is.na(d$padj) & d$padj < 0.05 & d$log2FoldChange < 0] <- "Downregulated"
+  d$neg_log10_pvalue <- -log10(pmax(d$pvalue, .Machine$double.xmin))
+  up <- head(d[d$direction == "Upregulated", , drop = FALSE], 5)
+  down <- head(d[d$direction == "Downregulated", , drop = FALSE], 5)
+  labels <- rbind(up, down)
+  p <- ggplot(d, aes(log2FoldChange, neg_log10_pvalue, color = direction)) +
+    geom_point(alpha = 0.6, size = 1.2) +
+    scale_color_manual(values = c(Downregulated = "#2166AC", `Not significant` = "grey70", Upregulated = "#B2182B")) +
+    geom_vline(xintercept = 0, linetype = 3) +
+    ggrepel::geom_text_repel(data = labels, aes(label = Gene_name), size = 3, max.overlaps = Inf) +
+    labs(title = title, x = "log2 fold change", y = "-log10(p-value)") +
+    theme_bw(base_size = 11) + theme(plot.title = element_text(hjust = 0.5))
+  ggplot2::ggsave(file.path(PLOT_DIR, paste0(prefix, "_volcano.pdf")), p, width = 8, height = 6)
+  utils::write.csv(labels, file.path(TABLE_DIR, paste0(prefix, "_volcano_labeled_genes.csv")), row.names = FALSE)
+}
+
+run_gsea <- function(tab, prefix, title) {
+  ranks <- tab[is.finite(tab$stat) & !is.na(tab$Gene_name) & nzchar(tab$Gene_name), c("Gene_name", "stat")]
+  ranks <- ranks[order(abs(ranks$stat), decreasing = TRUE), , drop = FALSE]
+  ranks <- ranks[!duplicated(ranks$Gene_name), , drop = FALSE]
+  gene_list <- ranks$stat
+  names(gene_list) <- ranks$Gene_name
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  set.seed(1)
+  gsea <- tryCatch(
+    suppressWarnings(clusterProfiler::gseGO(
+      geneList = gene_list, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP",
+      minGSSize = 10, maxGSSize = 500, pvalueCutoff = 0.05, pAdjustMethod = "BH",
+      verbose = FALSE, seed = TRUE
+    )),
+    error = function(e) e
+  )
+  out_file <- file.path(TABLE_DIR, paste0(prefix, "_GSEA_GO_BP.csv"))
+  plot_file <- file.path(PLOT_DIR, paste0(prefix, "_GSEA_dotplot.svg"))
+  if (inherits(gsea, "error")) {
+    utils::write.csv(data.frame(error = conditionMessage(gsea)), out_file, row.names = FALSE)
+    placeholder_svg(plot_file, paste(title, "GSEA"), conditionMessage(gsea))
+    return(invisible(NULL))
+  }
+  gtab <- as.data.frame(gsea)
+  gtab <- gtab[order(is.na(gtab$p.adjust), gtab$p.adjust), , drop = FALSE]
+  utils::write.csv(gtab, out_file, row.names = FALSE)
+  show <- head(gtab[!is.na(gtab$p.adjust) & gtab$p.adjust < 0.05, , drop = FALSE], 20)
+  if (nrow(show) == 0) show <- head(gtab, 20)
+  if (nrow(show) == 0) {
+    placeholder_svg(plot_file, paste(title, "GSEA"), "No enriched GO Biological Process terms")
+  } else {
+    show$Description <- factor(show$Description, levels = rev(show$Description))
+    p <- ggplot(show, aes(NES, Description, size = setSize, color = p.adjust)) +
+      geom_point() +
+      scale_color_viridis_c(direction = -1, na.value = "grey60") +
+      labs(title = paste(title, "GSEA: GO Biological Process"), x = "Normalized enrichment score (NES)", y = NULL) +
+      theme_bw(base_size = 10) + theme(plot.title = element_text(hjust = 0.5))
+    ggplot2::ggsave(plot_file, p, width = 10, height = 7)
+  }
+}
+
+run_deseq_analysis <- function(counts, metadata, annotation, design_formula, prefix, title) {
+  message(prefix, ": fitting DESeq2 model")
+  metadata <- droplevels(metadata)
+  dds <- DESeq2::DESeqDataSetFromMatrix(countData = counts, colData = metadata, design = design_formula)
+  keep <- rowSums(DESeq2::counts(dds) >= 10) >= 2
+  dds <- dds[keep, ]
+  dds <- DESeq2::DESeq(dds, quiet = TRUE)
+  res <- DESeq2::results(dds, contrast = c("Condition", "Senescent", "Control"), alpha = 0.05)
+  tab <- clean_results(res, annotation)
+  utils::write.csv(tab, file.path(TABLE_DIR, paste0(prefix, "_DE_results.csv")), row.names = FALSE)
+  message(prefix, ": generating PCA, heatmap, and volcano plot")
+  vsd <- DESeq2::vst(dds, blind = FALSE)
+  plot_pca(vsd, metadata, prefix, paste(title, "PCA"))
+  plot_heatmap(vsd, tab, metadata, prefix, paste(title, "top DE genes"))
+  plot_volcano(tab, prefix, paste(title, "Senescent vs Control"))
+  sample_count <- ncol(dds)
+  saveRDS(dds, file.path(TABLE_DIR, paste0(prefix, "_dds.rds")), compress = TRUE)
+  # Release large fitted and transformed objects before returning.
+  rm(dds, res, vsd)
+  invisible(gc())
+  summary <- data.frame(
+    analysis = prefix,
+    samples = sample_count,
+    tested_genes_with_names = nrow(tab),
+    fdr_lt_0.05 = sum(!is.na(tab$padj) & tab$padj < 0.05),
+    up_fdr_lt_0.05 = sum(!is.na(tab$padj) & tab$padj < 0.05 & tab$log2FoldChange > 0),
+    down_fdr_lt_0.05 = sum(!is.na(tab$padj) & tab$padj < 0.05 & tab$log2FoldChange < 0)
+  )
+  utils::write.csv(summary, file.path(TABLE_DIR, paste0(prefix, "_summary.csv")), row.names = FALSE)
+  invisible(summary)
+}

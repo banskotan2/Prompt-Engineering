@@ -1,0 +1,5 @@
+"PC1","PC2","group","name","Filename","Cell","Type","Condition","Comparison","TypeII","sizeFactor","Sample"
+-22.6785707151088,6.55017288512114,"Senescent:WI_38","SRR9016179","SRR9016179","WI_38","Replicative_Exhaustion","Senescent","8","Replicative_Exhaustion",1.03894772707207,"SRR9016179"
+-27.2454992740428,-5.97330786533855,"Senescent:WI_38","SRR9016180","SRR9016180","WI_38","Replicative_Exhaustion","Senescent","8","Replicative_Exhaustion",1.20927568361159,"SRR9016180"
+24.7991343560372,-0.910065044513955,"Control:WI_38","SRR9016181","SRR9016181","WI_38","Proliferating","Control","8","Control",1.0983868369709,"SRR9016181"
+25.1249356331143,0.333200024731366,"Control:WI_38","SRR9016182","SRR9016182","WI_38","Proliferating","Control","8","Control",0.747451068547892,"SRR9016182"
